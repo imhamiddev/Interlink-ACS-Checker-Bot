@@ -2,7 +2,6 @@ const TELEGRAM_API = (token) => `https://api.telegram.org/bot${token}`;
 const INTERLINK_API = (id) =>
   `https://prod.interlinklabs.ai/api/v1/ambassador-profile/get-profile/${id}`;
 const PROFILE_URL = (id) => `https://ambassador.interlinklabs.ai/en/${id}`;
-const userCooldown = new Map();
 
 export default {
   async fetch(request, env) {
@@ -41,25 +40,97 @@ async function setupWebhook(request, env) {
   });
 }
 
+// ===== ACS Text Builder =====
+function buildAcsLine(p) {
+  const totalAcs =
+    typeof p.acs === "number" ? parseFloat(p.acs.toFixed(2)) : null;
+  const teamAcs =
+    typeof p.userMetadata?.acs === "number"
+      ? parseFloat(p.userMetadata.acs.toFixed(2))
+      : null;
+
+  if (totalAcs === null) return `⭐ <b>ACS:</b> N/A`;
+
+  if (teamAcs !== null) {
+    const ambassadorAcs = parseFloat((totalAcs - teamAcs).toFixed(2));
+    return (
+      `⭐ <b>ACS:</b> ${totalAcs}\n` +
+      `   ├ 🧑‍💼 Ambassador: ${ambassadorAcs}\n` +
+      `   └ 👥 Team Grant: ${teamAcs}`
+    );
+  }
+
+  return `⭐ <b>ACS:</b> ${totalAcs}`;
+}
+
+// ===== Profile Text Builder =====
+function buildProfileText(p, userId) {
+  return (
+    `<b>Profile Found Successfully ✅</b>\n\n` +
+    `👤 <b>Name:</b> ${p.firstName} ${p.lastName}\n` +
+    `🆔 <b>ID:</b> <code>${userId}</code>\n` +
+    `🌍 <b>Country:</b> ${p.country}\n` +
+    `🏅 <b>Level:</b> ${p.userMetadata?.tierNameAmbassador}\n` +
+    `${buildAcsLine(p)}\n\n` +
+    `<i>Created by: <a href="https://t.me/imhamiddev">Hamid Dev</a></i>`
+  );
+}
+
+// ===== Keyboard Builder =====
+function buildKeyboard(p, userId) {
+  const keyboard = { inline_keyboard: [] };
+
+  if (Array.isArray(p.socialLinks)) {
+    let row = [];
+    p.socialLinks.forEach((item) => {
+      if (item?.link && item?.social) {
+        row.push({
+          text: item.social.toUpperCase(),
+          url: item.link,
+          style: "danger",
+        });
+        if (row.length === 2) {
+          keyboard.inline_keyboard.push(row);
+          row = [];
+        }
+      }
+    });
+    if (row.length > 0) keyboard.inline_keyboard.push(row);
+  }
+
+  keyboard.inline_keyboard.push(
+    [
+      {
+        text: "🔄 Refresh",
+        callback_data: `refresh_${userId}`,
+        style: "primary",
+      },
+    ],
+    [{ text: "View Profile", url: PROFILE_URL(userId), style: "success" }],
+  );
+
+  return keyboard;
+}
+
 async function handleUpdate(update, env) {
-  // ================= CALLBACK HANDLER (Refresh) =================
+  // ================= CALLBACK HANDLER =================
   if (update?.callback_query) {
     const query = update.callback_query;
     await fetch(`${TELEGRAM_API(env.BOT_TOKEN)}/answerCallbackQuery`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        callback_query_id: query.id,
-        show_alert: false,
-      }),
+      body: JSON.stringify({ callback_query_id: query.id, show_alert: false }),
     });
+
     const chatId = query.message.chat.id;
     const messageId = query.message.message_id;
     const data = query.data;
 
-    const userId = data?.startsWith("refresh_") ? data.split("_")[1] : null;
+    // --- Refresh ---
+    if (data?.startsWith("refresh_")) {
+      const userId = data.split("_")[1];
+      if (!userId) return;
 
-    if (data?.startsWith("refresh_") && userId) {
       try {
         await editMessage(env.BOT_TOKEN, chatId, messageId, "🔄 Refreshing...");
 
@@ -76,66 +147,10 @@ async function handleUpdate(update, env) {
         }
 
         const p = dataApi.data;
+        const textRes = buildProfileText(p, userId);
+        const keyboard = buildKeyboard(p, userId);
 
-        const acs =
-          typeof p.acs === "number" ? parseFloat(p.acs.toFixed(2)) : "N/A";
-
-        const textRes =
-          `<b>Profile Found Successfully ✅</b>\n\n` +
-          `👤 <b>Name:</b> ${p.firstName} ${p.lastName}\n` +
-          `🆔 <b>ID:</b> <code>${userId}</code>\n` +
-          `🌍 <b>Country:</b> ${p.country}\n` +
-          `🏅 <b>Level:</b> ${p.userMetadata?.tierNameAmbassador}\n` +
-          `⭐ <b>ACS:</b> ${acs}\n\n` +
-          `<i>Created by: <a href="https://t.me/imhamiddev">Hamid Dev</a></i>`;
-
-        const keyboard = {
-          inline_keyboard: [],
-        };
-
-        // social links
-        if (Array.isArray(p.socialLinks)) {
-          let row = [];
-
-          p.socialLinks.forEach((item) => {
-            if (item?.link && item?.social) {
-              row.push({
-                text: item.social.toUpperCase(),
-                url: item.link,
-                style: "danger",
-              });
-
-              if (row.length === 2) {
-                keyboard.inline_keyboard.push(row);
-                row = [];
-              }
-            }
-          });
-
-          if (row.length > 0) {
-            keyboard.inline_keyboard.push(row);
-          }
-        }
-
-        // main buttons
-        keyboard.inline_keyboard.push(
-          [
-            {
-              text: "🔄 Refresh",
-              callback_data: `refresh_${userId}`,
-              style: "primary",
-            },
-          ],
-          [
-            {
-              text: "View Profile",
-              url: PROFILE_URL(userId),
-              style: "success",
-            },
-          ],
-        );
-
-        return editMessage(env.BOT_TOKEN, chatId, messageId, text, keyboard);
+        return editMessage(env.BOT_TOKEN, chatId, messageId, textRes, keyboard);
       } catch {
         return editMessage(
           env.BOT_TOKEN,
@@ -145,8 +160,10 @@ async function handleUpdate(update, env) {
         );
       }
     }
+
+    // --- Profile detail (from /compare) ---
     if (data?.startsWith("profile_")) {
-      const userId = data?.split("_")?.[1];
+      const userId = data.split("_")?.[1];
       if (!userId) return;
 
       try {
@@ -163,18 +180,10 @@ async function handleUpdate(update, env) {
         }
 
         const p = d.data;
+        const text = buildProfileText(p, userId);
+        const keyboard = buildKeyboard(p, userId);
 
-        const acs =
-          typeof p.acs === "number" ? parseFloat(p.acs.toFixed(2)) : "N/A";
-
-        const text =
-          `<b>Profile Details</b>\n\n` +
-          `👤 ${p.firstName} ${p.lastName}\n` +
-          `🆔 <code>${userId}</code>\n` +
-          `🌍 ${p.country}\n` +
-          `⭐ ${acs}`;
-
-        return editMessage(env.BOT_TOKEN, chatId, messageId, text);
+        return editMessage(env.BOT_TOKEN, chatId, messageId, text, keyboard);
       } catch {
         return editMessage(env.BOT_TOKEN, chatId, messageId, "⚠️ Error");
       }
@@ -184,7 +193,6 @@ async function handleUpdate(update, env) {
   }
 
   // ================= MESSAGE HANDLER =================
-
   const message = update?.message;
   if (!message || !message.text) return;
 
@@ -192,11 +200,10 @@ async function handleUpdate(update, env) {
   const text = message.text.trim();
   const threadId = message.message_thread_id ?? null;
 
-  // 🔥 Anti-spam (light)
   const userIdUser = message?.from?.id;
   if (!userIdUser) return;
-  const now = Date.now();
 
+  const now = Date.now();
   if (!globalThis.__cooldown) globalThis.__cooldown = new Map();
 
   if (
@@ -210,28 +217,22 @@ async function handleUpdate(update, env) {
       threadId,
     );
   }
-
   globalThis.__cooldown.set(userIdUser, now);
 
-  // 🔥 typing action
   await fetch(`${TELEGRAM_API(env.BOT_TOKEN)}/sendChatAction`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      action: "typing",
-    }),
+    body: JSON.stringify({ chat_id: chatId, action: "typing" }),
   });
 
   // ================= /start =================
   if (text === "/start") {
-    await sendMessage(
+    return sendMessage(
       env.BOT_TOKEN,
       chatId,
-      `👋 Welcome to ACS Checker Bot!\n\nUse:\n<code>/ACS [ID]</code>`,
+      `👋 Welcome to ACS Checker Bot!\n\nUse:\n<code>/ACS [ID]</code>\n<code>/compare [ID1] [ID2]</code>`,
       threadId,
     );
-    return;
   }
 
   // ================= /compare =================
@@ -266,32 +267,22 @@ async function handleUpdate(update, env) {
       const acsA = a.acs ?? 0;
       const acsB = b.acs ?? 0;
 
-      const winner = acsA > acsB ? nameA : nameB;
+      const winner = acsA > acsB ? nameA : acsB > acsA ? nameB : "Tie 🤝";
 
       const msg =
-        `⚔️ <b>Comparison</b>\n\n` +
-        `Select a user below to view profile 👇\n\n` +
-        `${nameA}: ${acsA}\n` +
-        `${nameB}: ${acsB}\n\n` +
-        `🏆 ${winner}`;
+        `⚔️ <b>ACS Comparison</b>\n\n` +
+        `👤 ${nameA}: <b>${parseFloat(acsA.toFixed(2))}</b>\n` +
+        `👤 ${nameB}: <b>${parseFloat(acsB.toFixed(2))}</b>\n\n` +
+        `🏆 Winner: <b>${winner}</b>\n\n` +
+        `Tap a name to view their full profile 👇`;
+
       const keyboard = {
         inline_keyboard: [
-          [
-            {
-              text: nameA,
-              callback_data: `profile_${id1}`,
-              style: "primary",
-            },
-          ],
-          [
-            {
-              text: nameB,
-              callback_data: `profile_${id2}`,
-              style: "primary",
-            },
-          ],
+          [{ text: `👤 ${nameA}`, callback_data: `profile_${id1}` }],
+          [{ text: `👤 ${nameB}`, callback_data: `profile_${id2}` }],
         ],
       };
+
       return sendMessage(env.BOT_TOKEN, chatId, msg, threadId, keyboard);
     } catch {
       return sendMessage(env.BOT_TOKEN, chatId, "⚠️ Compare failed", threadId);
@@ -304,7 +295,7 @@ async function handleUpdate(update, env) {
     return sendMessage(
       env.BOT_TOKEN,
       chatId,
-      `❓ Unknown command\n<code>/ACS [ID]</code>`,
+      `❓ Unknown command\n\nUsage:\n<code>/ACS [ID]</code>\n<code>/compare [ID1] [ID2]</code>`,
       threadId,
     );
   }
@@ -317,14 +308,12 @@ async function handleUpdate(update, env) {
     "🔍 Searching user...\n\n[░░░░░░░░░░] 0%",
     threadId,
   );
-
   const messageId = loadingMsg.result.message_id;
 
   try {
     for (let i = 1; i <= 10; i++) {
       const percent = i * 10;
       await new Promise((r) => setTimeout(r, 300));
-
       await editMessage(
         env.BOT_TOKEN,
         chatId,
@@ -348,64 +337,8 @@ async function handleUpdate(update, env) {
     }
 
     const p = data.data;
-
-    const acs =
-      typeof p.acs === "number" ? parseFloat(p.acs.toFixed(2)) : "N/A";
-
-    const textRes =
-      `<b>Profile Found Successfully ✅</b>\n\n` +
-      `👤 <b>Name:</b> ${p.firstName} ${p.lastName}\n` +
-      `🆔 <b>ID:</b> <code>${userId}</code>\n` +
-      `🌍 <b>Country:</b> ${p.country}\n` +
-      `🏅 <b>Level:</b> ${p.userMetadata?.tierNameAmbassador}\n` +
-      `⭐ <b>ACS:</b> ${acs}\n\n` +
-      `<i>Created by: <a href="https://t.me/imhamiddev">Hamid Dev</a></i>`;
-
-    const keyboard = {
-      inline_keyboard: [],
-    };
-
-    // social links
-    if (Array.isArray(p.socialLinks)) {
-      let row = [];
-
-      p.socialLinks.forEach((item) => {
-        if (item?.link && item?.social) {
-          row.push({
-            text: item.social.toUpperCase(),
-            url: item.link,
-            style: "danger",
-          });
-
-          if (row.length === 2) {
-            keyboard.inline_keyboard.push(row);
-            row = [];
-          }
-        }
-      });
-
-      if (row.length > 0) {
-        keyboard.inline_keyboard.push(row);
-      }
-    }
-
-    // main buttons
-    keyboard.inline_keyboard.push(
-      [
-        {
-          text: "🔄 Refresh",
-          callback_data: `refresh_${userId}`,
-          style: "primary",
-        },
-      ],
-      [
-        {
-          text: "View Profile",
-          url: PROFILE_URL(userId),
-          style: "success",
-        },
-      ],
-    );
+    const textRes = buildProfileText(p, userId);
+    const keyboard = buildKeyboard(p, userId);
 
     if (p.avatar) {
       await fetch(`${TELEGRAM_API(env.BOT_TOKEN)}/sendPhoto`, {
@@ -423,9 +356,8 @@ async function handleUpdate(update, env) {
     } else {
       await sendMessage(env.BOT_TOKEN, chatId, textRes, threadId, keyboard);
     }
-  } catch (err) {
-    await deleteMessage(env.BOT_TOKEN, chatId, messageId);
-
+  } catch {
+    await deleteMessage(env.BOT_TOKEN, chatId, messageId).catch(() => {});
     return sendMessage(
       env.BOT_TOKEN,
       chatId,
@@ -438,11 +370,7 @@ async function handleUpdate(update, env) {
 // ===== UTILS =====
 
 async function sendMessageAndGetId(token, chatId, text, threadId = null) {
-  const body = {
-    chat_id: chatId,
-    text: text,
-    parse_mode: "HTML",
-  };
+  const body = { chat_id: chatId, text, parse_mode: "HTML" };
   if (threadId) body.message_thread_id = threadId;
 
   const res = await fetch(`${TELEGRAM_API(token)}/sendMessage`, {
@@ -453,16 +381,19 @@ async function sendMessageAndGetId(token, chatId, text, threadId = null) {
   return await res.json();
 }
 
-async function editMessage(token, chatId, messageId, text) {
+async function editMessage(token, chatId, messageId, text, replyMarkup = null) {
+  const body = {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "HTML",
+  };
+  if (replyMarkup) body.reply_markup = replyMarkup;
+
   await fetch(`${TELEGRAM_API(token)}/editMessageText`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      message_id: messageId,
-      text: text,
-      parse_mode: "HTML",
-    }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -470,17 +401,8 @@ async function deleteMessage(token, chatId, messageId) {
   await fetch(`${TELEGRAM_API(token)}/deleteMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      message_id: messageId,
-    }),
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
   });
-}
-
-function getProgressBar(percent) {
-  const total = 10;
-  const filled = Math.round((percent / 100) * total);
-  return "█".repeat(filled) + "░".repeat(total - filled);
 }
 
 async function sendMessage(
@@ -490,11 +412,7 @@ async function sendMessage(
   threadId = null,
   replyMarkup = null,
 ) {
-  const body = {
-    chat_id: chatId,
-    text: text,
-    parse_mode: "HTML",
-  };
+  const body = { chat_id: chatId, text, parse_mode: "HTML" };
   if (threadId) body.message_thread_id = threadId;
   if (replyMarkup) body.reply_markup = replyMarkup;
 
@@ -503,4 +421,10 @@ async function sendMessage(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+function getProgressBar(percent) {
+  const total = 10;
+  const filled = Math.round((percent / 100) * total);
+  return "█".repeat(filled) + "░".repeat(total - filled);
 }
